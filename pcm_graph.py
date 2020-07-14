@@ -153,6 +153,20 @@ def _plot(args, series, series_labels, x_series):
     plt.tight_layout()
 
 
+def _save_csv(out, series, series_labels, x_series):
+    data = np.array([x_series])
+    header = 'Time'
+    for i, y_series in enumerate(series):
+        label = series_labels[i]
+        if  _is_filter_match(label):
+            # sort in case PCM mixed up the order:
+            header += ',' + label
+            y = [b for (x, b) in sorted(zip(x_series, y_series))]
+            data = np.append(data, [y], axis=0)
+    np.savetxt(out, data.T, delimiter=',', fmt='%.5f', header=header)
+
+
+
 def main(args):
     series_labels, series = _parse_csv(args)
 
@@ -172,6 +186,8 @@ def main(args):
 
     # print(x_series)
     _plot(args, series, series_labels, x_series)
+    if args.csv_output:
+        _save_csv(args.csv_output, series, series_labels, x_series)
 
     if args.output:
         plt.savefig(args.output)
@@ -195,6 +211,7 @@ if __name__ == '__main__':
     #                     help='Define a custom matplotlib style to use, see `matplotlib.style`')
     parser.add_argument('-T', '--fig-title', help='Figure title')
     parser.add_argument('-o', '--output', help='Figure output file')
+    parser.add_argument('-c', '--csv-output', help='CSV output file')
     args = parser.parse_args()
 
     main(args)
