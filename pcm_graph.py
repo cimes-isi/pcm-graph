@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import argparse
 import csv
+import re
 import sys
 import datetime
 
@@ -16,18 +17,11 @@ def _parse_csv(args):
     series_labels = []
 
     with open(args.input, 'r') as f:
-        reader = csv.reader(f, delimiter=';')
+        reader = csv.reader(f, delimiter=',')
 
         # read and skip both header lines
         header = next(reader)
         subheader = next(reader)
-
-        # discover available nodes when necessary
-        if args.nodes == 'all':
-            args.nodes = []
-            for title in header:
-                if title.startswith('Socket'):
-                    args.nodes.append(int(title[6:]))
 
         # create proper series labels by appending sub-header to current
         # main header
@@ -36,7 +30,11 @@ def _parse_csv(args):
             if header[i]:
                 current_head = header[i]
 
-            series_labels.append(current_head + ' ' + col)
+            # TODO: Why is it sometimes empty?
+            # assert col != '', 'i = ' + str(i) + ', head = ' + current_head
+            # if not col:
+            #     col = 'UNKNOWN'
+            series_labels.append(current_head + '::' + col)
             series.append([])
 
         # read values and write into series
@@ -51,28 +49,6 @@ def _parse_csv(args):
                     series[i].append(float(val))
                 except ValueError:
                     series[i].append(val)
-
-    # accumulate data from all QPI links for each node
-    if not args.separate_qpi:
-        current_series = None
-        current_label = None
-        for i, header in enumerate(header):
-            if not header:
-                if current_series:
-                    for x, y in enumerate(series[i]):
-                        current_series[x] += y
-            elif header.startswith('SKT') and ('traffic' in header or 'data' in header):
-                if current_series:
-                    series.append(current_series)
-                    series_labels.append(current_label)
-
-                current_series = series[i][:]
-                current_label = header
-            else:
-                if current_series:
-                    series.append(current_series)
-                    series_labels.append(current_label)
-                    current_series = None
 
     return series_labels, series
 
@@ -98,72 +74,81 @@ def _create_time_series(series):
     return x_series
 
 
+def _is_filter_match(label):
+    if label.endswith('Date') or label.endswith('Time'):
+        return False
+    label_t = label.split('::')[0]
+    label_s = label.split('::')[1]
+    if args.title:
+        found = False
+        for t in args.title:
+            if args.regex:
+                found = re.match(t, label_t)
+            elif t == label_t:
+                found = True
+            if found:
+                break
+        if not found:
+            return False
+    if args.subtitle:
+        for t in args.subtitle:
+            if args.regex:
+                if re.match(t, label_s):
+                    return True
+            elif t == label_s:
+                return True
+        return False
+    return True
+
+
 def _plot(args, series, series_labels, x_series):
-    plt.style.use(args.style)
+    # plt.style.use(args.style) # FIXME
 
     # define color space
-    color_space = len(args.nodes)
-    if args.separate_qpi:
-        color_space *= 3
+    color_space = 0
+    for label in series_labels:
+        if _is_filter_match(label):
+            color_space += 1
 
-    color_n = 0
     color_list = plt.cm.Set1(np.linspace(0, 1, color_space))
 
+    color_n = 0
     for i, y_series in enumerate(series):
         label = series_labels[i]
-
-        if not label.startswith('SKT'):
+        if not _is_filter_match(label):
             continue
-
-        if args.percentages != ('percent' in label):
-            continue
-
-        if (not any([('SKT{}t'.format(n)) in label for n in args.nodes])) and (not any([('SKT{}d'.format(n)) in label for n in args.nodes])):
-            continue
-
-        if not args.separate_qpi and ' QPI' in label:
-            continue
-
-        if not ('dataIn' in label or 'trafficOut' in label):
-            continue
-
-        # print('{0}\t{1}'.format(label, sum(y)))
-        # print(color_list[color_n % color_space])
-        style = '-'
-        if 'dataIn' in label:
-            style = '--'
 
         # sort in case PCM mixed up the order:
         y = [b for (x, b) in sorted(zip(x_series, y_series))]
         x = sorted(x_series)
 
-        if not args.percentages:
-            y_per_sec = []
-            for index, value in enumerate(y):
-                if index == 0:
-                    y_per_sec.append(value)
-                else:
-                    y_per_sec.append(
-                        value / (x_series[index] - x_series[index - 1]))
-            y = y_per_sec
+        try:
+            plt.plot(sorted(x_series), y, label=label, linewidth=2, linestyle='-',
+                     color=color_list[color_n % color_space])
+            color_n += 1
+        except ValueError:
+            # Sometimes we get blank columns?
+            print('Error in column ' + str(i) + ': "' + label + '"')
+            print(x)
+            print(y)
 
-        plt.plot(sorted(x_series), y, label=label, linewidth=2, linestyle=style,
-                 color=color_list[color_n % color_space])
-        color_n += 1
+    # plt.xticks(range(int(max(x_series) + 2)))
 
-    plt.xticks(range(int(max(x_series) + 2)))
-
-    if args.title:
-        plt.title(args.title)
+    if args.fig_title:
+        plt.title(args.fig_title)
+    elif args.title and args.subtitle:
+        plt.title(str(args.title) + ' x ' + str(args.subtitle))
+    elif args.title:
+        plt.title(str(args.title))
+    elif args.subtitle:
+        plt.title('[\'.*\'] x ' + str(args.subtitle))
 
     plt.xlabel('Time (s)')
+    # plt.ylabel('') # TODO
 
-    if args.percentages:
-        plt.ylabel('QPI Traffic (%)')
-    else:
-        plt.ylabel('QPI Traffic (MB/s)')
+    plt.legend(prop={'size': 8})
 
-    plt.legend()
+    plt.xlim(right=plt.xlim()[1] * 1.3)
 
     plt.tight_layout()
 
@@ -183,39 +168,33 @@ def main(args):
     # create correct x-series
     x_series = _create_time_series(series)
 
+    # TODO: Average time series over time windows if too many entries?
+
     # print(x_series)
     _plot(args, series, series_labels, x_series)
 
-    plt.savefig(args.output)
+    if args.output:
+        plt.savefig(args.output)
+    else:
+        plt.show()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        'input', help='Path to the CSV file that contains the PCM results')
-    parser.add_argument(
-        '-o', '--output', help='Path to output file. Defaults to %%input%%.png')
-    parser.add_argument('-n', '--nodes', default='all',
-                        help='List of nodes to plot (e.g., 0,1,2,3)')
-    parser.add_argument('-p', '--percentages', action='store_true',
-                        help='Use the percentage values for traffic instead of absolute values')
-    parser.add_argument('-q', '--separate-qpi', action='store_true',
-                        help='Plot traffic for all QPI links separately')
-    parser.add_argument('-s', '--style', default='classic',
-                        help='Define a custom matplotlib style to use, see `matplotlib.style`')
-    parser.add_argument('-t', '--title', help='Title of the figure')
+    parser.add_argument('input', help='The PCM CSV file')
+    # Title classes that are enumerated: Socket0, SKT0dataIn, SKT0dataIn (percent), SKT0trafficOut, SKT0trafficOut (percent), SKT0 Core C-State, SKT0 Package C-State
+    # Title classes that are doubly enumerated: Core0 (Socket 0)
+    parser.add_argument('-t', '--title', action='append',
+                        help='Filter by title (e.g., System, System Core C-States, System Pack C-States, Socket0)')
+    # Subtitle classes that are enumerated: UPI0, SKT0
+    parser.add_argument('-s', '--subtitle', action='append',
+                        help='Filter by subtitles (e.g., EXEC, IPC, FREQ, AFREQ)')
+    parser.add_argument('-r', '--regex', action='store_true',
+                        help='Treat -t and -s options as regular expressions')
+    # parser.add_argument('-s', '--style', default='classic',
+    #                     help='Define a custom matplotlib style to use, see `matplotlib.style`')
+    parser.add_argument('-T', '--fig-title', help='Figure title')
+    parser.add_argument('-o', '--output', help='Figure output file')
     args = parser.parse_args()
-
-    # normalize arguments
-    if not args.output:
-        args.output = '{0}.png'.format(args.input)
-
-    if args.nodes != 'all':
-        try:
-            args.nodes = [int(node) for node in args.nodes.split(',')]
-        except Exception as e:
-            print(e)
-            print('Error parsing node list argument!')
-            sys.exit(1)
 
     main(args)
